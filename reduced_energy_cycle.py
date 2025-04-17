@@ -206,16 +206,14 @@ def enter_low_power_mode():
         except:
             pass
 
-    # Reduce CPU frequency if possible
+    # Reduce CPU frequency using sudo
     try:
-        # Set CPU to minimum frequency
-        min_freq = None
+        # Get minimum frequency
         with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", "r") as f:
             min_freq = f.read().strip()
 
         if min_freq:
-            with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed", "w") as f:
-                f.write(min_freq)
+            subprocess.run(["sudo", "sh", "-c", f"echo {min_freq} > /sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed"], check=False)
     except Exception as e:
         print(f"Warning: Could not reduce CPU frequency: {e}")
 
@@ -237,11 +235,9 @@ def exit_low_power_mode():
         except:
             pass
 
-    # Restore CPU frequency if needed
+    # Restore CPU frequency using sudo
     try:
-        # Reset governor to normal
-        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "w") as f:
-            f.write("ondemand")
+        subprocess.run(["sudo", "sh", "-c", "echo ondemand > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"], check=False)
     except Exception as e:
         print(f"Warning: Could not restore CPU frequency: {e}")
 
