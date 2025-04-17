@@ -169,27 +169,27 @@ def save_detection_data(image, detections, output_dir):
 
     print(f"Saved image and detections to {output_dir} at {timestamp}")
 
-
 def disable_unused_components():
     """Disable unused hardware components to save power."""
     try:
-        # Disable HDMI output if not needed
-        subprocess.run(["/usr/bin/tvservice", "-o"], check=False)
+        # Try to disable HDMI (might not work on all Pi models)
+        try:
+            subprocess.run(["sudo", "tvservice", "-o"], check=False)
+        except:
+            print("Could not disable HDMI output")
 
-        # Disable WiFi if not needed
-        subprocess.run(["sudo", "rfkill", "block", "wifi"], check=False)
-
-        # Disable Bluetooth if not needed
-        subprocess.run(["sudo", "rfkill", "block", "bluetooth"], check=False)
-
-        # Set CPU governor to powersave
-        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "w") as f:
-            f.write("powersave")
+        # Try to set CPU governor to powersave using sudo
+        try:
+            subprocess.run(["sudo", "sh", "-c", "echo powersave > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"], check=False)
+            # For Zero 2W, try to set all cores
+            for i in range(1, 4):
+                subprocess.run(["sudo", "sh", "-c", f"echo powersave > /sys/devices/system/cpu/cpu{i}/cpufreq/scaling_governor"], check=False)
+        except:
+            print("Could not set CPU governor")
 
         print("Disabled unused components for power saving")
     except Exception as e:
         print(f"Warning: Could not disable some components: {e}")
-
 
 def enter_low_power_mode():
     """Enter a low-power state without stopping the camera."""
@@ -206,19 +206,7 @@ def enter_low_power_mode():
         except:
             pass
 
-    # Reduce CPU frequency using sudo
-    try:
-        # Get minimum frequency
-        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", "r") as f:
-            min_freq = f.read().strip()
-
-        if min_freq:
-            subprocess.run(["sudo", "sh", "-c", f"echo {min_freq} > /sys/devices/system/cpu/cpu0/cpufreq/scaling_setspeed"], check=False)
-    except Exception as e:
-        print(f"Warning: Could not reduce CPU frequency: {e}")
-
     print("System now in low-power mode")
-
 
 def exit_low_power_mode():
     """Exit the low-power state and resume normal operation."""
@@ -234,12 +222,6 @@ def exit_low_power_mode():
             picam2.start_preview()
         except:
             pass
-
-    # Restore CPU frequency using sudo
-    try:
-        subprocess.run(["sudo", "sh", "-c", "echo ondemand > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"], check=False)
-    except Exception as e:
-        print(f"Warning: Could not restore CPU frequency: {e}")
 
     print("System resumed normal operation")
 
@@ -344,18 +326,6 @@ if __name__ == "__main__":
         while True:
             current_time = time.time()
 
-            # Log power mode transitions if requested
-            if args.log_power and args.energy_saving:
-                mode_elapsed = current_time - energy_mode_start_time
-
-                # Log transitions between power modes
-                if not in_low_power_mode and mode_elapsed >= args.active_time:
-                    with open("power_log.txt", "a") as f:
-                        f.write(f"{datetime.now()}: Transitioning to low power mode\n")
-                elif in_low_power_mode and mode_elapsed >= args.low_power_time:
-                    with open("power_log.txt", "a") as f:
-                        f.write(f"{datetime.now()}: Transitioning to active mode\n")
-
             # Handle energy saving mode transitions
             if args.energy_saving:
                 mode_elapsed = current_time - energy_mode_start_time
@@ -372,18 +342,17 @@ if __name__ == "__main__":
                     energy_mode_start_time = current_time
                     continue
 
-            # Skip processing in low power mode unless it's time to capture
-            if in_low_power_mode and current_time - last_capture_time < args.interval:
+            # Skip processing in low power mode
+            if in_low_power_mode:
                 time.sleep(0.5)  # Longer sleep in low power mode
                 continue
 
             # Normal operation during active time
 
-            # Get latest detections (skip if in low power mode and not capture time)
-            if not in_low_power_mode or current_time - last_capture_time >= args.interval:
-                last_results = parse_detections(picam2.capture_metadata())
+            # Get latest detections (only in active mode)
+            last_results = parse_detections(picam2.capture_metadata())
 
-            # Check if it's time to capture
+            # Check if it's time to capture (only in active mode)
             if current_time - last_capture_time >= args.interval:
                 # Capture image
                 image = picam2.capture_array()
@@ -399,11 +368,8 @@ if __name__ == "__main__":
                     with open("power_log.txt", "a") as f:
                         f.write(f"{datetime.now()}: Captured and saved image\n")
 
-            # Short sleep to prevent CPU hogging (longer in low power mode)
-            if in_low_power_mode:
-                time.sleep(0.5)
-            else:
-                time.sleep(0.1)
+            # Short sleep to prevent CPU hogging
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("Data collection stopped")
