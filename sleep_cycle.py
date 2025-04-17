@@ -4,6 +4,7 @@ import time
 import os
 from datetime import datetime
 from functools import lru_cache
+import subprocess
 
 import cv2
 import numpy as np
@@ -111,43 +112,88 @@ def draw_detections(request, stream="main"):
             color = (255, 0, 0)  # red
             cv2.putText(m.array, "ROI", (b_x + 5, b_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))
+
+
 def save_detection_data(image, detections, output_dir):
+    """Save the image with bounding boxes and detection information."""
+    # Create directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
+
+    # Generate timestamp for unique filenames
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # Create a copy of the image to draw on
     image_with_boxes = image.copy()
     labels = get_labels()
 
+    # Draw bounding boxes on the image
     for detection in detections:
         x, y, w, h = detection.box
         label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
 
+        # Draw detection box
         cv2.rectangle(image_with_boxes, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
 
+        # Calculate text size and position
         (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         text_x = x + 5
         text_y = y + 15
 
+        # Draw background for text
         cv2.rectangle(image_with_boxes,
                       (text_x, text_y - text_height),
                       (text_x + text_width, text_y + baseline),
                       (255, 255, 255),  # Background color (white)
                       cv2.FILLED)
 
+        # Draw text
         cv2.putText(image_with_boxes, label, (text_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
+    # Save the image with bounding boxes
     image_path = os.path.join(output_dir, f"{timestamp}.jpg")
     cv2.imwrite(image_path, image_with_boxes)
 
+    # Save detection information as text
     txt_path = os.path.join(output_dir, f"{timestamp}_detections.txt")
     with open(txt_path, 'w') as f:
         for detection in detections:
+            # Format: class_name confidence x y width height
             label_name = labels[int(detection.category)]
             x, y, w, h = detection.box
             f.write(f"{label_name} {detection.conf:.4f} {x} {y} {w} {h}\n")
 
     print(f"Saved image and detections to {output_dir} at {timestamp}")
+
+
+def disable_unused_components():
+    """Disable unused hardware components to save power."""
+    try:
+        # Disable HDMI output if not needed
+        subprocess.run(["/usr/bin/tvservice", "-o"], check=False)
+
+        # Set CPU governor to powersave
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "w") as f:
+            f.write("powersave")
+
+        print("Disabled unused components for power saving")
+    except Exception as e:
+        print(f"Warning: Could not disable some components: {e}")
+
+
+def sleep_system(seconds):
+    """Put the system into a low-power state for the specified time."""
+    print(f"Entering low power sleep for {seconds} seconds...")
+
+    # First stop the camera to save power
+    picam2.stop()
+
+    # Sleep for the specified duration
+    time.sleep(seconds)
+
+    # Restart the camera
+    picam2.start(config, show_preview=True)
+    print("System woke up, camera restarted")
 
 
 def get_args():
@@ -172,11 +218,21 @@ def get_args():
                         help="Interval between captures in seconds")
     parser.add_argument("--output-dir", type=str, default="collected_data",
                         help="Directory to save captured images and detection data")
+    parser.add_argument("--duty-cycle", action="store_true",
+                        help="Enable duty cycling (active/sleep cycles)")
+    parser.add_argument("--active-time", type=int, default=30,
+                        help="Active time in seconds for duty cycling")
+    parser.add_argument("--sleep-time", type=int, default=30,
+                        help="Sleep time in seconds for duty cycling")
+    parser.add_argument("--disable-unused", action="store_true",
+                        help="Disable unused components (HDMI, set CPU governor)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = get_args()
+
+    # This must be called before instantiation of Picamera2
     imx500 = IMX500(args.model)
     intrinsics = imx500.network_intrinsics
     if not intrinsics:
@@ -186,6 +242,7 @@ if __name__ == "__main__":
         print("Network is not an object detection task", file=sys.stderr)
         exit()
 
+    # Override intrinsics from args
     for key, value in vars(args).items():
         if key == 'labels' and value is not None:
             with open(value, 'r') as f:
@@ -193,10 +250,15 @@ if __name__ == "__main__":
         elif hasattr(intrinsics, key) and value is not None:
             setattr(intrinsics, key, value)
 
+    # Defaults
     if intrinsics.labels is None:
         with open("assets/coco_labels.txt", "r") as f:
             intrinsics.labels = f.read().splitlines()
     intrinsics.update_with_defaults()
+
+    # Disable unused components if requested
+    if args.disable_unused:
+        disable_unused_components()
 
     picam2 = Picamera2(imx500.camera_num)
     config = picam2.create_preview_configuration(controls={"FrameRate": intrinsics.inference_rate}, buffer_count=12)
@@ -210,21 +272,44 @@ if __name__ == "__main__":
     last_results = None
     picam2.pre_callback = draw_detections
 
+    # Data collection variables
     last_capture_time = 0
+    duty_cycle_start_time = time.time()
 
     try:
         while True:
+            # Check if duty cycling is enabled
+            if args.duty_cycle:
+                current_cycle_time = time.time() - duty_cycle_start_time
+
+                # If we've been active for the specified time, go to sleep
+                if current_cycle_time >= args.active_time:
+                    # Sleep for the specified time
+                    sleep_system(args.sleep_time)
+
+                    # Reset the duty cycle timer
+                    duty_cycle_start_time = time.time()
+                    last_capture_time = time.time()  # Reset capture timer after sleep
+                    continue
+
+            # Normal operation during active time
             current_time = time.time()
 
+            # Get latest detections
             last_results = parse_detections(picam2.capture_metadata())
 
+            # Check if it's time to capture
             if current_time - last_capture_time >= args.interval:
+                # Capture image
                 image = picam2.capture_array()
 
+                # Save image and detection data
                 save_detection_data(image, last_results, args.output_dir)
 
+                # Update last capture time
                 last_capture_time = current_time
 
+            # Short sleep to prevent CPU hogging
             time.sleep(0.1)
 
     except KeyboardInterrupt:
